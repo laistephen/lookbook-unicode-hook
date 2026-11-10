@@ -26,11 +26,14 @@ jobs:
         cd build
         cmake -A Win32 ..
         cmake --build . --config Release
+        # 自動搜尋並將 minhook.lib 複製到專案根目錄
+        $lib = Get-ChildItem -Recurse -Filter "minhook.lib" | Select-Object -First 1
+        Copy-Item $lib.FullName -Destination "..\.."
       shell: pwsh
 
     - name: Compile Hook DLL
       run: |
-        cl /EHsc /LD /O2 main.cpp /I"minhook/include" minhook/build/Release/minhook.lib user32.lib kernel32.lib /Fe:LookbookHook.dll
+        cl /EHsc /LD /O2 main.cpp /I"minhook/include" minhook.lib user32.lib kernel32.lib /Fe:LookbookHook.dll
       shell: cmd
 
     - name: Upload Artifacts
