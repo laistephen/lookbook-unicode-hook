@@ -3,52 +3,127 @@
 #include "MinHook.h"
 #include <string>
 #include <vector>
+#include <algorithm>
 
 // 定義原始 API 函數指標
 typedef HANDLE(WINAPI* FnCreateFileA)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
 typedef BOOL(WINAPI* FnReadFile)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
 typedef BOOL(WINAPI* FnWriteFile)(HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
-typedef INT(WINAPI* FnMultiByteToWideChar)(UINT, DWORD, LPCSTR, int, LPWSTR, int);
-typedef INT(WINAPI* FnWideCharToMultiByte)(UINT, DWORD, LPCWSTR, int, LPSTR, int, LPCSTR, LPBOOL);
 
 FnCreateFileA fpCreateFileA = NULL;
 FnReadFile fpReadFile = NULL;
 FnWriteFile fpWriteFile = NULL;
-FnMultiByteToWideChar fpMultiByteToWideChar = NULL;
-FnWideCharToMultiByte fpWideCharToMultiByte = NULL;
 
-// 攔截 MultiByteToWideChar：當 Lookbook 內部轉碼時，即時攔截並修正缺字或方塊 □
-INT WINAPI HookedMultiByteToWideChar(
-    UINT CodePage, DWORD dwFlags, LPCSTR lpMultiByteStr, int cbMultiByte, LPWSTR lpWideCharStr, int cchWideChar) 
-{
-    int ret = fpMultiByteToWideChar(CodePage, dwFlags, lpMultiByteStr, cbMultiByte, lpWideCharStr, cchWideChar);
-    
-    // 如果成功轉換出寬字元，對內容進行動態掃描與修正
-    if (ret > 0 && lpWideCharStr != NULL && cchWideChar > 0) {
-        int count = (cchWideChar < ret) ? cchWideChar : ret;
-        for (int i = 0; i < count; ++i) {
-            // 範例：將「犟」字代碼 (0x729F) 或因缺字產生的不支援代碼進行即時對應修正
-            if (lpWideCharStr[i] == 0x729F) {
-                lpWideCharStr[i] = 0x5F3A; // 自動替換為繁體中文可顯示的「強」
-            }
-            // 也可以針對寬字元為 0x25A1 (即方塊 □) 的狀況進行額外條件捕捉與修復
+// 輔助函數：檢查是否為有效的 UTF-8 格式
+bool IsUtf8(const char* data, size_t size) {
+    size_t i = 0;
+    bool has_utf8 = false;
+    while (i < size) {
+        unsigned char c = data[i];
+        if (c < 0x80) { i++; continue; }
+        has_utf8 = true;
+        size_t expected = 0;
+        if ((c & 0xE0) == 0xC0) expected = 1;
+        else if ((c & 0xF0) == 0xE0) expected = 2;
+        else if ((c & 0xF8) == 0xF0) expected = 3;
+        else return false;
+        
+        if (i + expected >= size) return false;
+        for (size_t j = 1; j <= expected; ++j) {
+            if ((data[i + j] & 0xC0) != 0x80) return false;
+        }
+        i += expected + 1;
+    }
+    return has_utf8;
+}
+
+// 核心轉碼與智慧防呆：將 GBK/UTF-8 轉為 Big5，並將缺字（如 犟 0x729F）對應至可顯示字元
+std::vector<char> TranslateTextBuffer(const char* data, size_t size) {
+    if (size == 0) return {};
+
+    UINT sourceCP = CP_ACP;
+    if (IsUtf8(data, size)) {
+        sourceCP = CP_UTF8;
+    } else {
+        sourceCP = 936; // GBK / 簡體中文
+    }
+
+    // 1. 轉為寬字元 (UTF-16)
+    int wlen = MultiByteToWideChar(sourceCP, 0, data, (int)size, NULL, 0);
+    if (wlen <= 0) return std::vector<char>(data, data + size);
+
+    std::wstring wstr(wlen, 0);
+    MultiByteToWideChar(sourceCP, 0, data, (int)size, &wstr[0], wlen);
+
+    // 2. 智慧防呆替換（使用 Unicode 0x729F 對應「犟」字，轉為可顯示的「強」）
+    for (size_t i = 0; i < wstr.length(); ++i) {
+        wchar_t& ch = wstr[i];
+        if (ch == 0x729F) {
+            ch = L'強'; 
         }
     }
-    return ret;
+
+    // 3. 轉回 Big5 (CP950)
+    int alen = WideCharToMultiByte(950, 0, wstr.c_str(), wlen, NULL, 0, NULL, NULL);
+    if (alen <= 0) return std::vector<char>(data, data + size);
+
+    std::vector<char> outBuffer(alen);
+    WideCharToMultiByte(950, 0, wstr.c_str(), wlen, outBuffer.data(), alen, NULL, NULL);
+    return outBuffer;
 }
 
-// 攔截 WideCharToMultiByte
-INT WINAPI HookedWideCharToMultiByte(
-    UINT CodePage, DWORD dwFlags, LPCWSTR lpWideCharStr, int cchWideChar, LPSTR lpMultiByteStr, int cbMultiByte, LPCSTR lpDefaultChar, LPBOOL lpUsedDefaultChar) 
+// 檢查是否為 .txt 檔案
+bool IsTxtFile(LPCSTR filename) {
+    if (!filename) return false;
+    std::string name(filename);
+    if (name.length() < 4) return false;
+    std::transform(name.begin(), name.end(), name.begin(), ::tolower);
+    return name.substr(name.length() - 4) == ".txt";
+}
+
+// 1. 攔截 CreateFileA：核心重新導向邏輯
+HANDLE WINAPI HookedCreateFileA(
+    LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
+    LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition,
+    DWORD dwFlagsAndAttributes, HANDLE hTemplateFile) 
 {
-    return fpWideCharToMultiByte(CodePage, dwFlags, lpWideCharStr, cchWideChar, lpMultiByteStr, cbMultiByte, lpDefaultChar, lpUsedDefaultChar);
+    // 當 Lookbook 嘗試讀取 .txt 檔案時，我們在背景建立一個轉譯後的乾淨暫存檔交給它
+    if (lpFileName && IsTxtFile(lpFileName) && (dwDesiredAccess & GENERIC_READ) && !(dwDesiredAccess & GENERIC_WRITE)) {
+        HANDLE hReal = fpCreateFileA(lpFileName, GENERIC_READ, FILE_SHARE_READ, lpSecurityAttributes, OPEN_EXISTING, dwFlagsAndAttributes, hTemplateFile);
+        if (hReal != INVALID_HANDLE_VALUE) {
+            DWORD fileSize = GetFileSize(hReal, NULL);
+            if (fileSize != INVALID_FILE_SIZE && fileSize > 0) {
+                std::vector<char> fileBuffer(fileSize);
+                DWORD bytesRead = 0;
+                if (ReadFile(hReal, fileBuffer.data(), fileSize, &bytesRead, NULL) && bytesRead > 0) {
+                    CloseHandle(hReal); // 關閉原檔案
+
+                    // 轉換編碼並修正缺字
+                    std::vector<char> converted = TranslateTextBuffer(fileBuffer.data(), bytesRead);
+
+                    // 建立 Windows 暫存檔（會在關閉時自動刪除）
+                    char tempPath[MAX_PATH];
+                    char tempFile[MAX_PATH];
+                    GetTempPathA(MAX_PATH, tempPath);
+                    GetTempFileNameA(tempPath, "LBK", 0, tempFile);
+
+                    HANDLE hTemp = CreateFileA(tempFile, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+                    if (hTemp != INVALID_HANDLE_VALUE) {
+                        DWORD bytesWritten = 0;
+                        WriteFile(hTemp, converted.data(), (DWORD)converted.size(), &bytesWritten, NULL);
+                        SetFilePointer(hTemp, 0, NULL, FILE_BEGIN); // 將指針歸零
+                        return hTemp; // 直接把轉譯好的暫存檔控制代碼傳給 Lookbook！
+                    }
+                }
+            }
+            CloseHandle(hReal);
+        }
+    }
+
+    return fpCreateFileA(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
 }
 
-// 基礎檔案讀寫攔截
-HANDLE WINAPI HookedCreateFileA(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplateFile) {
-    return fpCreateFileA ? fpCreateFileA(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile) : INVALID_HANDLE_VALUE;
-}
-
+// 2. 基礎讀寫攔截
 BOOL WINAPI HookedReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead, LPDWORD lpNumberOfBytesRead, LPOVERLAPPED lpOverlapped) {
     return fpReadFile ? fpReadFile(hFile, lpBuffer, nNumberOfBytesToRead, lpNumberOfBytesRead, lpOverlapped) : FALSE;
 }
@@ -66,16 +141,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             MH_CreateHook(&CreateFileA, &HookedCreateFileA, reinterpret_cast<LPVOID*>(&fpCreateFileA));
             MH_CreateHook(&ReadFile, &HookedReadFile, reinterpret_cast<LPVOID*>(&fpReadFile));
             MH_CreateHook(&WriteFile, &HookedWriteFile, reinterpret_cast<LPVOID*>(&fpWriteFile));
-
-            // 直接掛載攔截 kernel32 的 MultiByteToWideChar，從根本解決內建轉碼缺字問題
-            HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
-            if (hKernel32) {
-                LPVOID pMultiByteToWideChar = (LPVOID)GetProcAddress(hKernel32, "MultiByteToWideChar");
-                LPVOID pWideCharToMultiByte = (LPVOID)GetProcAddress(hKernel32, "WideCharToMultiByte");
-                if (pMultiByteToWideChar) MH_CreateHook(pMultiByteToWideChar, &HookedMultiByteToWideChar, reinterpret_cast<LPVOID*>(&fpMultiByteToWideChar));
-                if (pWideCharToMultiByte) MH_CreateHook(pWideCharToMultiByte, &HookedWideCharToMultiByte, reinterpret_cast<LPVOID*>(&fpWideCharToMultiByte));
-            }
-
             MH_EnableHook(MH_ALL_HOOKS);
         }
         break;
