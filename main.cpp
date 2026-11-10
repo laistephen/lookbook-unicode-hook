@@ -15,65 +15,24 @@ FnCreateFileW fpCreateFileW = NULL;
 FnReadFile fpReadFile = NULL;
 FnWriteFile fpWriteFile = NULL;
 
-// 嚴格的 UTF-8 位元組特徵驗證函式（絕不會把 GBK 誤判為 UTF-8）
-bool IsStrictUtf8(const char* data, size_t size) {
-    size_t i = 0;
-    bool has_multibyte = false;
-    while (i < size) {
-        unsigned char c = data[i];
-        if (c < 0x80) { 
-            i++; 
-            continue; 
-        }
-        size_t extra = 0;
-        if ((c & 0xE0) == 0xC0) { extra = 1; }
-        else if ((c & 0xF0) == 0xE0) { extra = 2; }
-        else if ((c & 0xF8) == 0xF0) { extra = 3; }
-        else { return false; } // 不符合 UTF-8 首位元組規範，直接判定為非 UTF-8 (如 GBK)
-
-        if (i + extra >= size) return false;
-        for (size_t j = 1; j <= extra; ++j) {
-            unsigned char next = data[i + j];
-            // UTF-8 的後續位元組必須嚴格以 10xxxxxx 開頭 (0x80 ~ 0xBF)
-            if ((next & 0xC0) != 0x80) {
-                return false; 
-            }
-        }
-        has_multibyte = true;
-        i += extra + 1;
-    }
-    return has_multibyte;
-}
-
-// 核心轉碼：智慧辨識編碼 (GBK / UTF-8) -> 寬字元 -> 簡轉繁 -> 姓氏保護 -> Big5
+// 核心轉碼引擎：精準鎖定 GBK (936) -> 寬字元 -> 簡轉繁 -> 姓氏保護 -> Big5
 std::vector<char> TranslateTextBuffer(const char* data, size_t size) {
     if (size == 0) return {};
 
-    UINT sourceCP = 936; // 預設為 GBK (CP936)
-    const char* parseData = data;
-    size_t parseSize = size;
+    // 鎖定使用 GBK (Code Page 936) 進行正確解碼
+    UINT sourceCP = 936; 
 
-    // 1. 自動偵測編碼：支援帶 BOM 的 UTF-8 或嚴格符合結構的 UTF-8
-    if (size >= 3 && (unsigned char)data[0] == 0xEF && (unsigned char)data[1] == 0xBB && (unsigned char)data[2] == 0xBF) {
-        sourceCP = CP_UTF8;
-        parseData = data + 3;
-        parseSize = size - 3;
-    } 
-    else if (IsStrictUtf8(data, size)) {
-        sourceCP = CP_UTF8;
-    }
-
-    // 2. 將原始資料轉為寬字元 (UTF-16)
-    int wlen = MultiByteToWideChar(sourceCP, 0, parseData, (int)parseSize, NULL, 0);
+    // 1. 將 GBK 原始二進位資料轉為寬字元 (UTF-16)
+    int wlen = MultiByteToWideChar(sourceCP, 0, data, (int)size, NULL, 0);
     if (wlen <= 0) return std::vector<char>(data, data + size);
 
     std::wstring wstr(wlen, 0);
-    MultiByteToWideChar(sourceCP, 0, parseData, (int)parseSize, &wstr[0], wlen);
+    MultiByteToWideChar(sourceCP, 0, data, (int)size, &wstr[0], wlen);
 
-    // 3. 使用 Windows API 將簡體中文轉為繁體中文
+    // 2. 使用 Windows API 將簡體中文轉為標準繁體中文
     LCMapStringW(LOCALE_USER_DEFAULT, LCMAP_TRADITIONAL_CHINESE, &wstr[0], wlen, &wstr[0], wlen);
 
-    // 4. 【自訂保護清單與缺字防呆】
+    // 3. 【智慧防呆與保護清單】
     for (size_t i = 0; i < wstr.length(); ++i) {
         wchar_t& ch = wstr[i];
         
@@ -88,12 +47,12 @@ std::vector<char> TranslateTextBuffer(const char* data, size_t size) {
         }
     }
 
-    // 5. 轉回 Lookbook 專用的 Big5 (CP950)
-    int alen = WideCharToMultiByte(950, 0, wstr.c_str(), wlen, NULL, 0, NULL, NULL);
+    // 4. 轉回 Lookbook 專用的 Big5 (CP950)
+    int alen = WideCharToMultiByte(950, 0, wstr.c_str(), (int)wstr.length(), NULL, 0, NULL, NULL);
     if (alen <= 0) return std::vector<char>(data, data + size);
 
     std::vector<char> outBuffer(alen);
-    WideCharToMultiByte(950, 0, wstr.c_str(), wlen, outBuffer.data(), alen, NULL, NULL);
+    WideCharToMultiByte(950, 0, wstr.c_str(), (int)wstr.length(), outBuffer.data(), alen, NULL, NULL);
     return outBuffer;
 }
 
