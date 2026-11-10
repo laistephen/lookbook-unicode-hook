@@ -5,22 +5,22 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     char szPath[MAX_PATH];
     GetCurrentDirectoryA(MAX_PATH, szPath);
     
-    std::string exePath = std::string(szPath) + "\\LookBook_orig.exe";
+    std::string exePath = std::string(szPath) + "\\LookBook.exe";
     std::string dllPath = std::string(szPath) + "\\LookbookHook.dll";
 
     STARTUPINFOA si = { sizeof(si) };
     PROCESS_INFORMATION pi = { 0 };
 
-    // 正常啟動主程式（移除 CREATE_SUSPENDED，讓 OLE/COM 正常初始化）
+    // 正常啟動原本的 LookBook.exe（維持原檔名，確保相容性與 OLE 正常）
     if (!CreateProcessA(exePath.c_str(), NULL, NULL, NULL, FALSE, 0, NULL, szPath, &si, &pi)) {
-        MessageBoxA(NULL, "找不到 LookBook_orig.exe！請確定是否已將原本的 LookBook.exe 改名為 LookBook_orig.exe。", "錯誤", MB_OK | MB_ICONERROR);
+        MessageBoxA(NULL, "找不到 LookBook.exe！請確定載入器與 LookBook.exe 放在同一資料夾中。", "錯誤", MB_OK | MB_ICONERROR);
         return 1;
     }
 
-    // 稍微等待 150 毫秒，讓主程式完成初始化
-    Sleep(150);
+    // 等待 300 毫秒，讓主程式完成 OLE 初始化
+    Sleep(300);
 
-    // 在目標進程中配置記憶體並寫入 DLL 路徑
+    // 注入 DLL
     LPVOID pLibRemote = VirtualAllocEx(pi.hProcess, NULL, dllPath.length() + 1, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     if (pLibRemote) {
         WriteProcessMemory(pi.hProcess, pLibRemote, dllPath.c_str(), dllPath.length() + 1, NULL);
