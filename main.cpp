@@ -5,7 +5,7 @@
 #include <vector>
 #include <algorithm>
 
-// --- 1. version.dll 代理轉發宣告 (確保不發生 0xc000007b 錯誤) ---
+// --- 1. version.dll 代理轉發宣告 ---
 HINSTANCE hRealVersion = NULL;
 
 typedef BOOL (WINAPI *pfnGetFileVersionInfoA)(LPCSTR, DWORD, DWORD, LPVOID);
@@ -27,7 +27,7 @@ extern "C" {
         if (!real_GetFileVersionInfoA) {
             char sysPath[MAX_PATH];
             GetSystemDirectoryA(sysPath, MAX_PATH);
-            strcat_s(sysPath, "\\version.dll");
+            strcat_s(sysPath, sizeof(sysPath), "\\version.dll");
             hRealVersion = LoadLibraryA(sysPath);
             if (hRealVersion) real_GetFileVersionInfoA = (pfnGetFileVersionInfoA)GetProcAddress(hRealVersion, "GetFileVersionInfoA");
         }
@@ -38,7 +38,7 @@ extern "C" {
         if (!real_GetFileVersionInfoW) {
             char sysPath[MAX_PATH];
             GetSystemDirectoryA(sysPath, MAX_PATH);
-            strcat_s(sysPath, "\\version.dll");
+            strcat_s(sysPath, sizeof(sysPath), "\\version.dll");
             if (!hRealVersion) hRealVersion = LoadLibraryA(sysPath);
             real_GetFileVersionInfoW = (pfnGetFileVersionInfoW)GetProcAddress(hRealVersion, "GetFileVersionInfoW");
         }
@@ -49,7 +49,7 @@ extern "C" {
         if (!real_GetFileVersionInfoSizeA) {
             char sysPath[MAX_PATH];
             GetSystemDirectoryA(sysPath, MAX_PATH);
-            strcat_s(sysPath, "\\version.dll");
+            strcat_s(sysPath, sizeof(sysPath), "\\version.dll");
             if (!hRealVersion) hRealVersion = LoadLibraryA(sysPath);
             real_GetFileVersionInfoSizeA = (pfnGetFileVersionInfoSizeA)GetProcAddress(hRealVersion, "GetFileVersionInfoSizeA");
         }
@@ -60,7 +60,7 @@ extern "C" {
         if (!real_GetFileVersionInfoSizeW) {
             char sysPath[MAX_PATH];
             GetSystemDirectoryA(sysPath, MAX_PATH);
-            strcat_s(sysPath, "\\version.dll");
+            strcat_s(sysPath, sizeof(sysPath), "\\version.dll");
             if (!hRealVersion) hRealVersion = LoadLibraryA(sysPath);
             real_GetFileVersionInfoSizeW = (pfnGetFileVersionInfoSizeW)GetProcAddress(hRealVersion, "GetFileVersionInfoSizeW");
         }
@@ -71,7 +71,7 @@ extern "C" {
         if (!real_VerQueryValueA) {
             char sysPath[MAX_PATH];
             GetSystemDirectoryA(sysPath, MAX_PATH);
-            strcat_s(sysPath, "\\version.dll");
+            strcat_s(sysPath, sizeof(sysPath), "\\version.dll");
             if (!hRealVersion) hRealVersion = LoadLibraryA(sysPath);
             real_VerQueryValueA = (pfnVerQueryValueA)GetProcAddress(hRealVersion, "VerQueryValueA");
         }
@@ -82,7 +82,7 @@ extern "C" {
         if (!real_VerQueryValueW) {
             char sysPath[MAX_PATH];
             GetSystemDirectoryA(sysPath, MAX_PATH);
-            strcat_s(sysPath, "\\version.dll");
+            strcat_s(sysPath, sizeof(sysPath), "\\version.dll");
             if (!hRealVersion) hRealVersion = LoadLibraryA(sysPath);
             real_VerQueryValueW = (pfnVerQueryValueW)GetProcAddress(hRealVersion, "VerQueryValueW");
         }
