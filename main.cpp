@@ -11,14 +11,15 @@ typedef HANDLE(WINAPI* FnCreateFileW)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUT
 typedef BOOL(WINAPI* FnReadFile)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
 typedef BOOL(WINAPI* FnWriteFile)(HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
 typedef BOOL(WINAPI* FnCloseHandle)(HANDLE);
+typedef DWORD(WINAPI* FnGetFileSize)(HANDLE, LPDWORD);
 
 FnCreateFileA fpCreateFileA = NULL;
 FnCreateFileW fpCreateFileW = NULL;
 FnReadFile fpReadFile = NULL;
 FnWriteFile fpWriteFile = NULL;
 FnCloseHandle fpCloseHandle = NULL;
+FnGetFileSize fpGetFileSize = NULL;
 
-// 儲存被攔截檔案的記憶體轉譯資料與目前讀取指標
 struct HookedFileContext {
     std::vector<char> data;
     DWORD position;
@@ -27,7 +28,7 @@ struct HookedFileContext {
 std::map<HANDLE, HookedFileContext> g_hookedFiles;
 CRITICAL_SECTION g_cs;
 
-// 核心轉碼引擎：自動編碼辨識 + 簡轉繁 + 姓氏保護 + Big5 轉譯
+// 核心轉碼引擎：GBK/UTF-8 -> 寬字元 -> 簡轉繁 -> 姓氏保護 -> Big5
 std::vector<char> TranslateTextBuffer(const char* data, size_t size) {
     if (size == 0) return {};
 
@@ -35,7 +36,6 @@ std::vector<char> TranslateTextBuffer(const char* data, size_t size) {
     const char* parseData = data;
     size_t parseSize = size;
 
-    // 1. 自動偵測 UTF-8 帶 BOM 或標準 UTF-8
     if (size >= 3 && (unsigned char)data[0] == 0xEF && (unsigned char)data[1] == 0xBB && (unsigned char)data[2] == 0xBF) {
         sourceCP = CP_UTF8;
         parseData = data + 3;
@@ -45,32 +45,24 @@ std::vector<char> TranslateTextBuffer(const char* data, size_t size) {
         sourceCP = CP_UTF8;
     }
 
-    // 2. 轉為寬字元 (UTF-16)
     int wlen = MultiByteToWideChar(sourceCP, 0, parseData, (int)parseSize, NULL, 0);
     if (wlen <= 0) return std::vector<char>(data, data + size);
 
     std::wstring wstr(wlen, 0);
     MultiByteToWideChar(sourceCP, 0, parseData, (int)parseSize, &wstr[0], wlen);
 
-    // 3. 簡體轉繁體
     LCMapStringW(LOCALE_USER_DEFAULT, LCMAP_TRADITIONAL_CHINESE, &wstr[0], wlen, &wstr[0], wlen);
 
-    // 4. 【智慧防呆與保護清單】
     for (size_t i = 0; i < wstr.length(); ++i) {
         wchar_t& ch = wstr[i];
-        
-        // 保護姓氏：將被誤轉成繁體「範」的字還原為「范」
         if (ch == L'範') {
-            ch = L'范';
+            ch = L'范'; // 保護姓氏
         }
-
-        // 缺字防呆（例如 0x729F 這種 Big5 缺字轉為強）
         if (ch == 0x729F) {
-            ch = L'強';
+            ch = L'強'; // 缺字防呆
         }
     }
 
-    // 5. 轉回 Lookbook 專用的 Big5 (CP950)
     int alen = WideCharToMultiByte(950, 0, wstr.c_str(), (int)wstr.length(), NULL, 0, NULL, NULL);
     if (alen <= 0) return std::vector<char>(data, data + size);
 
@@ -95,7 +87,7 @@ HANDLE WINAPI HookedCreateFileA(
     HANDLE hReal = fpCreateFileA(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
     
     if (lpFileName && IsTxtFile(lpFileName) && hReal != INVALID_HANDLE_VALUE && (dwDesiredAccess & GENERIC_READ)) {
-        DWORD fileSize = GetFileSize(hReal, NULL);
+        DWORD fileSize = fpGetFileSize ? fpGetFileSize(hReal, NULL) : GetFileSize(hReal, NULL);
         if (fileSize != INVALID_FILE_SIZE && fileSize > 0) {
             std::vector<char> fileBuffer(fileSize);
             DWORD bytesRead = 0;
@@ -124,7 +116,7 @@ HANDLE WINAPI HookedCreateFileW(
             std::string ansiName(len - 1, 0);
             WideCharToMultiByte(CP_ACP, 0, lpFileName, -1, &ansiName[0], len, NULL, NULL);
             if (IsTxtFile(ansiName.c_str())) {
-                DWORD fileSize = GetFileSize(hReal, NULL);
+                DWORD fileSize = fpGetFileSize ? fpGetFileSize(hReal, NULL) : GetFileSize(hReal, NULL);
                 if (fileSize != INVALID_FILE_SIZE && fileSize > 0) {
                     std::vector<char> fileBuffer(fileSize);
                     DWORD bytesRead = 0;
@@ -140,6 +132,19 @@ HANDLE WINAPI HookedCreateFileW(
         }
     }
     return hReal;
+}
+
+DWORD WINAPI HookedGetFileSize(HANDLE hFile, LPDWORD lpFileSizeHigh) {
+    EnterCriticalSection(&g_cs);
+    auto it = g_hookedFiles.find(hFile);
+    if (it != g_hookedFiles.end()) {
+        if (lpFileSizeHigh) *lpFileSizeHigh = 0;
+        DWORD size = (DWORD)it->second.data.size();
+        LeaveCriticalSection(&g_cs);
+        return size;
+    }
+    LeaveCriticalSection(&g_cs);
+    return fpGetFileSize ? fpGetFileSize(hFile, lpFileSizeHigh) : INVALID_FILE_SIZE;
 }
 
 BOOL WINAPI HookedReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead, LPDWORD lpNumberOfBytesRead, LPOVERLAPPED lpOverlapped) {
@@ -189,6 +194,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             MH_CreateHook(&ReadFile, &HookedReadFile, reinterpret_cast<LPVOID*>(&fpReadFile));
             MH_CreateHook(&WriteFile, &HookedWriteFile, reinterpret_cast<LPVOID*>(&fpWriteFile));
             MH_CreateHook(&CloseHandle, &HookedCloseHandle, reinterpret_cast<LPVOID*>(&fpCloseHandle));
+            MH_CreateHook(&GetFileSize, &HookedGetFileSize, reinterpret_cast<LPVOID*>(&fpGetFileSize));
             MH_EnableHook(MH_ALL_HOOKS);
         }
         break;
