@@ -153,9 +153,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     switch (ul_reason_for_call) {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hModule);
-        // 彈窗確認是否成功載入
-        MessageBoxA(NULL, "LookbookHook (version.dll) 成功載入！", "Debug", MB_OK);
-
         if (MH_Initialize() == MH_OK) {
             MH_CreateHook(&CreateFileA, &HookedCreateFileA, reinterpret_cast<LPVOID*>(&fpCreateFileA));
             MH_CreateHook(&CreateFileW, &HookedCreateFileW, reinterpret_cast<LPVOID*>(&fpCreateFileW));
