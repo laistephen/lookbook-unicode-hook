@@ -1,0 +1,40 @@
+name: Build Lookbook Hook DLL
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up MSVC (x86)
+      uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x86
+
+    - name: Clone and Build MinHook (x86)
+      run: |
+        git clone https://github.com/TsudaKageyu/minhook.git
+        cd minhook
+        mkdir build
+        cd build
+        cmake -A Win32 ..
+        cmake --build . --config Release
+      shell: pwsh
+
+    - name: Compile Hook DLL
+      run: |
+        cl /EHsc /LD /O2 main.cpp /I"minhook/include" minhook/build/Release/minhook.lib user32.lib kernel32.lib /Fe:LookbookHook.dll
+      shell: cmd
+
+    - name: Upload Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: LookbookHook-x86
+        path: LookbookHook.dll
