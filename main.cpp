@@ -12,6 +12,7 @@ typedef BOOL(WINAPI* FnReadFile)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
 typedef BOOL(WINAPI* FnWriteFile)(HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
 typedef BOOL(WINAPI* FnCloseHandle)(HANDLE);
 typedef DWORD(WINAPI* FnGetFileSize)(HANDLE, LPDWORD);
+typedef DWORD(WINAPI* FnSetFilePointer)(HANDLE, LONG, PLONG, DWORD);
 
 FnCreateFileA fpCreateFileA = NULL;
 FnCreateFileW fpCreateFileW = NULL;
@@ -19,6 +20,7 @@ FnReadFile fpReadFile = NULL;
 FnWriteFile fpWriteFile = NULL;
 FnCloseHandle fpCloseHandle = NULL;
 FnGetFileSize fpGetFileSize = NULL;
+FnSetFilePointer fpSetFilePointer = NULL;
 
 struct HookedFileContext {
     std::vector<char> data;
@@ -147,6 +149,32 @@ DWORD WINAPI HookedGetFileSize(HANDLE hFile, LPDWORD lpFileSizeHigh) {
     return fpGetFileSize ? fpGetFileSize(hFile, lpFileSizeHigh) : INVALID_FILE_SIZE;
 }
 
+DWORD WINAPI HookedSetFilePointer(HANDLE hFile, LONG lDistanceToMove, PLONG lpDistanceToMoveHigh, DWORD dwMoveMethod) {
+    EnterCriticalSection(&g_cs);
+    auto it = g_hookedFiles.find(hFile);
+    if (it != g_hookedFiles.end()) {
+        auto& ctx = it->second;
+        long long base = 0;
+        if (dwMoveMethod == FILE_BEGIN) {
+            base = 0;
+        } else if (dwMoveMethod == FILE_CURRENT) {
+            base = ctx.position;
+        } else if (dwMoveMethod == FILE_END) {
+            base = ctx.data.size();
+        }
+        long long newPos = base + lDistanceToMove;
+        if (newPos < 0) newPos = 0;
+        if (newPos > (long long)ctx.data.size()) newPos = ctx.data.size();
+
+        ctx.position = (DWORD)newPos;
+        if (lpDistanceToMoveHigh) *lpDistanceToMoveHigh = 0;
+        LeaveCriticalSection(&g_cs);
+        return (DWORD)newPos;
+    }
+    LeaveCriticalSection(&g_cs);
+    return fpSetFilePointer ? fpSetFilePointer(hFile, lDistanceToMove, lpDistanceToMoveHigh, dwMoveMethod) : INVALID_SET_FILE_POINTER;
+}
+
 BOOL WINAPI HookedReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead, LPDWORD lpNumberOfBytesRead, LPOVERLAPPED lpOverlapped) {
     EnterCriticalSection(&g_cs);
     auto it = g_hookedFiles.find(hFile);
@@ -195,6 +223,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             MH_CreateHook(&WriteFile, &HookedWriteFile, reinterpret_cast<LPVOID*>(&fpWriteFile));
             MH_CreateHook(&CloseHandle, &HookedCloseHandle, reinterpret_cast<LPVOID*>(&fpCloseHandle));
             MH_CreateHook(&GetFileSize, &HookedGetFileSize, reinterpret_cast<LPVOID*>(&fpGetFileSize));
+            MH_CreateHook(&SetFilePointer, &HookedSetFilePointer, reinterpret_cast<LPVOID*>(&fpSetFilePointer));
             MH_EnableHook(MH_ALL_HOOKS);
         }
         break;
