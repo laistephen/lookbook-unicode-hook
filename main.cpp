@@ -3,6 +3,7 @@
 #include "MinHook.h"
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 // 定義原始 API 函數指標
 typedef HANDLE(WINAPI* FnCreateFileA)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
@@ -36,16 +37,15 @@ bool IsUtf8(const char* data, size_t size) {
     return has_utf8;
 }
 
-// 核心轉碼函數：將 GBK 或 UTF-8 轉為系統預設 ANSI (Big5) 供舊軟體正確顯示
+// 核心轉碼與智慧防呆函數：將 GBK/UTF-8 轉為 Big5，並對 Big5 缺字進行智慧替換
 std::vector<char> TranslateTextBuffer(const char* data, size_t size) {
     if (size == 0) return {};
 
-    UINT sourceCP = CP_ACP; // 預設
+    UINT sourceCP = CP_ACP;
     if (IsUtf8(data, size)) {
         sourceCP = CP_UTF8;
     } else {
-        // 簡單判定是否為 GBK 範圍，若不是純 ASCII 則嘗試以 GBK (CP936) 解讀
-        sourceCP = 936; 
+        sourceCP = 936; // GBK
     }
 
     // 1. 先轉為寬字元 (UTF-16)
@@ -54,6 +54,15 @@ std::vector<char> TranslateTextBuffer(const char* data, size_t size) {
 
     std::wstring wstr(wlen, 0);
     MultiByteToWideChar(sourceCP, 0, data, (int)size, &wstr[0], wlen);
+
+    // 針對 Big5 缺字進行智慧替換（例如將「犟」對應至繁體可顯示的「強」或其他防呆字元）
+    for (size_t i = 0; i < wstr.length(); ++i) {
+        wchar_t& ch = wstr[i];
+        if (ch == L'犟') {
+            ch = L'強'; // 智慧對應至繁體中文等效字，避免產生方塊 □
+        }
+        // 可在此處繼續擴充其他常見的 Big5 缺字對應
+    }
 
     // 2. 再從寬字元轉回系統當前 ANSI (繁體中文 Big5 / CP950)
     int alen = WideCharToMultiByte(950, 0, wstr.c_str(), wlen, NULL, 0, NULL, NULL);
@@ -73,20 +82,16 @@ HANDLE WINAPI HookedCreateFileA(
     return fpCreateFileA(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
 }
 
-// 2. 攔截 ReadFile：自動攔截並將 GBK/UTF-8 轉譯為 Big5
+// 2. 攔截 ReadFile
 BOOL WINAPI HookedReadFile(
     HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead,
     LPDWORD lpNumberOfBytesRead, LPOVERLAPPED lpOverlapped) 
 {
     BOOL result = fpReadFile(hFile, lpBuffer, nNumberOfBytesToRead, lpNumberOfBytesRead, lpOverlapped);
     if (result && lpNumberOfBytesRead && *lpNumberOfBytesRead > 0) {
-        // 讀取原始檔案資料
         std::vector<char> rawData((char*)lpBuffer, (char*)lpBuffer + *lpNumberOfBytesRead);
-        
-        // 進行編碼智慧轉換
         std::vector<char> converted = TranslateTextBuffer(rawData.data(), rawData.size());
 
-        // 如果轉換後的長度小於等於緩衝區容量，則複寫進去
         if (converted.size() <= nNumberOfBytesToRead) {
             memcpy(lpBuffer, converted.data(), converted.size());
             *lpNumberOfBytesRead = (DWORD)converted.size();
