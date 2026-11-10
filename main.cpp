@@ -37,6 +37,7 @@ bool IsUtf8(const char* data, size_t size) {
     return has_utf8;
 }
 
+// 核心轉碼與智慧防呆：簡體轉繁體 + 自訂保護清單 + Big5 轉譯
 std::vector<char> TranslateTextBuffer(const char* data, size_t size) {
     if (size == 0) return {};
 
@@ -44,22 +45,35 @@ std::vector<char> TranslateTextBuffer(const char* data, size_t size) {
     if (IsUtf8(data, size)) {
         sourceCP = CP_UTF8;
     } else {
-        sourceCP = 936; // GBK
+        sourceCP = 936; // GBK / 簡體中文
     }
 
+    // 1. 先將原始檔案轉為寬字元 (UTF-16)
     int wlen = MultiByteToWideChar(sourceCP, 0, data, (int)size, NULL, 0);
     if (wlen <= 0) return std::vector<char>(data, data + size);
 
     std::wstring wstr(wlen, 0);
     MultiByteToWideChar(sourceCP, 0, data, (int)size, &wstr[0], wlen);
 
+    // 2. 使用 Windows API 將簡體中文直接轉為繁體中文
+    LCMapStringW(LOCALE_USER_DEFAULT, LCMAP_TRADITIONAL_CHINESE, &wstr[0], wlen, &wstr[0], wlen);
+
+    // 3. 【自訂保護清單與缺字防呆】
     for (size_t i = 0; i < wstr.length(); ++i) {
         wchar_t& ch = wstr[i];
+        
+        // 保護姓氏：將被誤轉成繁體「範」的字還原為簡體/常用字「范」
+        if (ch == L'範') {
+            ch = L'范';
+        }
+
+        // 缺字防呆（例如 0x729F 這種 Big5 缺字轉為強）
         if (ch == 0x729F) {
-            ch = L'強'; 
+            ch = L'強';
         }
     }
 
+    // 4. 轉回 Lookbook 看得懂的 Big5 (CP950)
     int alen = WideCharToMultiByte(950, 0, wstr.c_str(), wlen, NULL, 0, NULL, NULL);
     if (alen <= 0) return std::vector<char>(data, data + size);
 
