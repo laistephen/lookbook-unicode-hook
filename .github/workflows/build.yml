@@ -22,7 +22,7 @@ jobs:
       run: |
         git clone https://github.com/TsudaKageyu/minhook.git
         cd minhook
-        mkdir build
+        if (!(Test-Path build)) { mkdir build }
         cd build
         cmake -A Win32 ..
         cmake --build . --config Release
