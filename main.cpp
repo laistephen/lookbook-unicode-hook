@@ -2,90 +2,105 @@
 #include <richedit.h>
 #include "MinHook.h"
 #include <string>
-#include <unordered_map>
-#include <fstream>
+#include <vector>
 
 // 定義原始 API 函數指標
 typedef HANDLE(WINAPI* FnCreateFileA)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
 typedef BOOL(WINAPI* FnReadFile)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
 typedef BOOL(WINAPI* FnWriteFile)(HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
-typedef HWND(WINAPI* FnCreateWindowExA)(DWORD, LPCSTR, LPCSTR, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE, LPVOID);
 
 FnCreateFileA fpCreateFileA = NULL;
 FnReadFile fpReadFile = NULL;
 FnWriteFile fpWriteFile = NULL;
-FnCreateWindowExA fpCreateWindowExA = NULL;
 
-// 【Big5 私用區動態字元映射保險箱】記憶體對應表
-// 用於暫存 Big5 無法顯示或編碼衝突的罕見字，對應至 Unicode / UTF-8
-std::unordered_map<wchar_t, std::string> g_puaSafeBox;
-
-// 輔助函數：UTF-8 轉寬字元 (UTF-16)
-std::wstring Utf8ToWide(const std::string& str) {
-    if (str.empty()) return L"";
-    int size_needed = MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), NULL, 0);
-    std::wstring wstrTo(size_needed, 0);
-    MultiByteToWideChar(CP_UTF8, 0, &str[0], (int)str.size(), &wstrTo[0], size_needed);
-    return wstrTo;
+// 輔助函數：檢查是否為有效的 UTF-8 格式
+bool IsUtf8(const char* data, size_t size) {
+    size_t i = 0;
+    bool has_utf8 = false;
+    while (i < size) {
+        unsigned char c = data[i];
+        if (c < 0x80) { i++; continue; }
+        has_utf8 = true;
+        size_t expected = 0;
+        if ((c & 0xE0) == 0xC0) expected = 1;
+        else if ((c & 0xF0) == 0xE0) expected = 2;
+        else if ((c & 0xF8) == 0xF0) expected = 3;
+        else return false;
+        
+        if (i + expected >= size) return false;
+        for (size_t j = 1; j <= expected; ++j) {
+            if ((data[i + j] & 0xC0) != 0x80) return false;
+        }
+        i += expected + 1;
+    }
+    return has_utf8;
 }
 
-// 輔助函數：寬字元 (UTF-16) 轉 UTF-8
-std::string WideToUtf8(const std::wstring& wstr) {
-    if (wstr.empty()) return "";
-    int size_needed = WideCharToMultiByte(CP_ACP, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
-    // 實際專案中可轉為 CP_UTF8 輸出
-    int sz_utf8 = WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), NULL, 0, NULL, NULL);
-    std::string strTo(sz_utf8, 0);
-    WideCharToMultiByte(CP_UTF8, 0, &wstr[0], (int)wstr.size(), &strTo[0], sz_utf8, NULL, NULL);
-    return strTo;
+// 核心轉碼函數：將 GBK 或 UTF-8 轉為系統預設 ANSI (Big5) 供舊軟體正確顯示
+std::vector<char> TranslateTextBuffer(const char* data, size_t size) {
+    if (size == 0) return {};
+
+    UINT sourceCP = CP_ACP; // 預設
+    if (IsUtf8(data, size)) {
+        sourceCP = CP_UTF8;
+    } else {
+        // 簡單判定是否為 GBK 範圍，若不是純 ASCII 則嘗試以 GBK (CP936) 解讀
+        sourceCP = 936; 
+    }
+
+    // 1. 先轉為寬字元 (UTF-16)
+    int wlen = MultiByteToWideChar(sourceCP, 0, data, (int)size, NULL, 0);
+    if (wlen <= 0) return std::vector<char>(data, data + size);
+
+    std::wstring wstr(wlen, 0);
+    MultiByteToWideChar(sourceCP, 0, data, (int)size, &wstr[0], wlen);
+
+    // 2. 再從寬字元轉回系統當前 ANSI (繁體中文 Big5 / CP950)
+    int alen = WideCharToMultiByte(950, 0, wstr.c_str(), wlen, NULL, 0, NULL, NULL);
+    if (alen <= 0) return std::vector<char>(data, data + size);
+
+    std::vector<char> outBuffer(alen);
+    WideCharToMultiByte(950, 0, wstr.c_str(), wlen, outBuffer.data(), alen, NULL, NULL);
+    return outBuffer;
 }
 
-// 1. 攔截 CreateFileA：確保開檔時能夠正確應對路徑或模式
+// 1. 攔截 CreateFileA
 HANDLE WINAPI HookedCreateFileA(
     LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
     LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition,
     DWORD dwFlagsAndAttributes, HANDLE hTemplateFile) 
 {
-    // 若有需要可在此處將 Big5 路徑轉為 Wide 呼叫 CreateFileW
     return fpCreateFileA(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
 }
 
-// 2. 攔截 ReadFile：讀入 UTF-8 檔案時，即時轉譯為軟體能接受的 Big5 / 保險箱字元
+// 2. 攔截 ReadFile：自動攔截並將 GBK/UTF-8 轉譯為 Big5
 BOOL WINAPI HookedReadFile(
     HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead,
     LPDWORD lpNumberOfBytesRead, LPOVERLAPPED lpOverlapped) 
 {
     BOOL result = fpReadFile(hFile, lpBuffer, nNumberOfBytesToRead, lpNumberOfBytesRead, lpOverlapped);
     if (result && lpNumberOfBytesRead && *lpNumberOfBytesRead > 0) {
-        // 可以在此處加入自動偵測 UTF-8 BOM 並進行即時轉碼邏輯
+        // 讀取原始檔案資料
+        std::vector<char> rawData((char*)lpBuffer, (char*)lpBuffer + *lpNumberOfBytesRead);
+        
+        // 進行編碼智慧轉換
+        std::vector<char> converted = TranslateTextBuffer(rawData.data(), rawData.size());
+
+        // 如果轉換後的長度小於等於緩衝區容量，則複寫進去
+        if (converted.size() <= nNumberOfBytesToRead) {
+            memcpy(lpBuffer, converted.data(), converted.size());
+            *lpNumberOfBytesRead = (DWORD)converted.size();
+        }
     }
     return result;
 }
 
-// 3. 攔截 WriteFile：確保寫入時將保險箱中的罕見字還原為無損 UTF-8
+// 3. 攔截 WriteFile
 BOOL WINAPI HookedWriteFile(
     HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytesToWrite,
     LPDWORD lpNumberOfBytesWritten, LPOVERLAPPED lpOverlapped) 
 {
-    // 攔截並確保匯出為純淨的 UTF-8 格式
     return fpWriteFile(hFile, lpBuffer, nNumberOfBytesToWrite, lpNumberOfBytesWritten, lpOverlapped);
-}
-
-// 4. 攔截視窗建立：將 RichEdit 升級為支援 Unicode 的版本
-HWND WINAPI HookedCreateWindowExA(
-    DWORD dwExStyle, LPCSTR lpClassName, LPCSTR lpWindowName, DWORD dwStyle,
-    int x, int y, int nWidth, int nHeight, HWND hWndParent, HMENU hMenu,
-    HINSTANCE hInstance, LPVOID lpParam) 
-{
-    // 如果建立的是 RichEdit 控制項，將其類別名稱強制導向或升級
-    if (lpClassName && (INT_PTR)lpClassName > 0xFFFF) {
-        if (stricmp(lpClassName, "RichEdit") == 0 || stricmp(lpClassName, "RICHEDIT20A") == 0) {
-            // 可在此置換為 Unicode 處理常式或載入 riched20.dll
-            HMODULE hRich = LoadLibraryA("RICHED20.DLL");
-            // 讓控制項以更佳相容性運行
-        }
-    }
-    return fpCreateWindowExA(dwExStyle, lpClassName, lpWindowName, dwStyle, x, y, nWidth, nHeight, hWndParent, hMenu, hInstance, lpParam);
 }
 
 // DLL 入口點
@@ -94,12 +109,9 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hModule);
         if (MH_Initialize() == MH_OK) {
-            // 攔截核心 API
             MH_CreateHook(&CreateFileA, &HookedCreateFileA, reinterpret_cast<LPVOID*>(&fpCreateFileA));
             MH_CreateHook(&ReadFile, &HookedReadFile, reinterpret_cast<LPVOID*>(&fpReadFile));
             MH_CreateHook(&WriteFile, &HookedWriteFile, reinterpret_cast<LPVOID*>(&fpWriteFile));
-            MH_CreateHook(&CreateWindowExA, &HookedCreateWindowExA, reinterpret_cast<LPVOID*>(&fpCreateWindowExA));
-            
             MH_EnableHook(MH_ALL_HOOKS);
         }
         break;
