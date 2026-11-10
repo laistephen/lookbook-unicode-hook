@@ -7,10 +7,12 @@
 
 // 定義原始 API 函數指標
 typedef HANDLE(WINAPI* FnCreateFileA)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
+typedef HANDLE(WINAPI* FnCreateFileW)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
 typedef BOOL(WINAPI* FnReadFile)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
 typedef BOOL(WINAPI* FnWriteFile)(HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
 
 FnCreateFileA fpCreateFileA = NULL;
+FnCreateFileW fpCreateFileW = NULL;
 FnReadFile fpReadFile = NULL;
 FnWriteFile fpWriteFile = NULL;
 
@@ -81,49 +83,77 @@ bool IsTxtFile(LPCSTR filename) {
     return name.substr(name.length() - 4) == ".txt";
 }
 
-// 1. 攔截 CreateFileA：核心重新導向邏輯
+// 共用核心：讀取真實檔案 -> 轉碼轉譯 -> 建立暫存檔並回傳控制代碼
+HANDLE OpenAndRedirectTxt(HANDLE hReal) {
+    if (hReal == INVALID_HANDLE_VALUE) return INVALID_HANDLE_VALUE;
+    DWORD fileSize = GetFileSize(hReal, NULL);
+    if (fileSize == INVALID_FILE_SIZE || fileSize == 0) {
+        CloseHandle(hReal);
+        return INVALID_HANDLE_VALUE;
+    }
+    std::vector<char> fileBuffer(fileSize);
+    DWORD bytesRead = 0;
+    if (!ReadFile(hReal, fileBuffer.data(), fileSize, &bytesRead, NULL) || bytesRead == 0) {
+        CloseHandle(hReal);
+        return INVALID_HANDLE_VALUE;
+    }
+    CloseHandle(hReal); // 關閉原檔案
+
+    // 轉換編碼並修正缺字
+    std::vector<char> converted = TranslateTextBuffer(fileBuffer.data(), bytesRead);
+
+    // 建立 Windows 暫存檔
+    char tempPath[MAX_PATH];
+    char tempFile[MAX_PATH];
+    GetTempPathA(MAX_PATH, tempPath);
+    GetTempFileNameA(tempPath, "LBK", 0, tempFile);
+
+    HANDLE hTemp = CreateFileA(tempFile, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+    if (hTemp != INVALID_HANDLE_VALUE) {
+        DWORD bytesWritten = 0;
+        WriteFile(hTemp, converted.data(), (DWORD)converted.size(), &bytesWritten, NULL);
+        SetFilePointer(hTemp, 0, NULL, FILE_BEGIN);
+        return hTemp; // 回傳轉譯後的暫存檔 Handle
+    }
+    return INVALID_HANDLE_VALUE;
+}
+
+// 1. 攔截 CreateFileA
 HANDLE WINAPI HookedCreateFileA(
     LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
     LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition,
     DWORD dwFlagsAndAttributes, HANDLE hTemplateFile) 
 {
-    // 當 Lookbook 嘗試讀取 .txt 檔案時，我們在背景建立一個轉譯後的乾淨暫存檔交給它
     if (lpFileName && IsTxtFile(lpFileName) && (dwDesiredAccess & GENERIC_READ) && !(dwDesiredAccess & GENERIC_WRITE)) {
         HANDLE hReal = fpCreateFileA(lpFileName, GENERIC_READ, FILE_SHARE_READ, lpSecurityAttributes, OPEN_EXISTING, dwFlagsAndAttributes, hTemplateFile);
-        if (hReal != INVALID_HANDLE_VALUE) {
-            DWORD fileSize = GetFileSize(hReal, NULL);
-            if (fileSize != INVALID_FILE_SIZE && fileSize > 0) {
-                std::vector<char> fileBuffer(fileSize);
-                DWORD bytesRead = 0;
-                if (ReadFile(hReal, fileBuffer.data(), fileSize, &bytesRead, NULL) && bytesRead > 0) {
-                    CloseHandle(hReal); // 關閉原檔案
-
-                    // 轉換編碼並修正缺字
-                    std::vector<char> converted = TranslateTextBuffer(fileBuffer.data(), bytesRead);
-
-                    // 建立 Windows 暫存檔（會在關閉時自動刪除）
-                    char tempPath[MAX_PATH];
-                    char tempFile[MAX_PATH];
-                    GetTempPathA(MAX_PATH, tempPath);
-                    GetTempFileNameA(tempPath, "LBK", 0, tempFile);
-
-                    HANDLE hTemp = CreateFileA(tempFile, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
-                    if (hTemp != INVALID_HANDLE_VALUE) {
-                        DWORD bytesWritten = 0;
-                        WriteFile(hTemp, converted.data(), (DWORD)converted.size(), &bytesWritten, NULL);
-                        SetFilePointer(hTemp, 0, NULL, FILE_BEGIN); // 將指針歸零
-                        return hTemp; // 直接把轉譯好的暫存檔控制代碼傳給 Lookbook！
-                    }
-                }
-            }
-            CloseHandle(hReal);
-        }
+        HANDLE hRedirected = OpenAndRedirectTxt(hReal);
+        if (hRedirected != INVALID_HANDLE_VALUE) return hRedirected;
     }
-
     return fpCreateFileA(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
 }
 
-// 2. 基礎讀寫攔截
+// 2. 攔截 CreateFileW (關鍵：許多 Windows 程式底層開檔走的是這個寬字元版本)
+HANDLE WINAPI HookedCreateFileW(
+    LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
+    LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition,
+    DWORD dwFlagsAndAttributes, HANDLE hTemplateFile) 
+{
+    if (lpFileName && (dwDesiredAccess & GENERIC_READ) && !(dwDesiredAccess & GENERIC_WRITE)) {
+        int len = WideCharToMultiByte(CP_ACP, 0, lpFileName, -1, NULL, 0, NULL, NULL);
+        if (len > 0) {
+            std::string ansiName(len - 1, 0);
+            WideCharToMultiByte(CP_ACP, 0, lpFileName, -1, &ansiName[0], len, NULL, NULL);
+            if (IsTxtFile(ansiName.c_str())) {
+                HANDLE hReal = fpCreateFileW(lpFileName, GENERIC_READ, FILE_SHARE_READ, lpSecurityAttributes, OPEN_EXISTING, dwFlagsAndAttributes, hTemplateFile);
+                HANDLE hRedirected = OpenAndRedirectTxt(hReal);
+                if (hRedirected != INVALID_HANDLE_VALUE) return hRedirected;
+            }
+        }
+    }
+    return fpCreateFileW(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
+}
+
+// 3. 基礎讀寫攔截
 BOOL WINAPI HookedReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead, LPDWORD lpNumberOfBytesRead, LPOVERLAPPED lpOverlapped) {
     return fpReadFile ? fpReadFile(hFile, lpBuffer, nNumberOfBytesToRead, lpNumberOfBytesRead, lpOverlapped) : FALSE;
 }
@@ -139,6 +169,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         DisableThreadLibraryCalls(hModule);
         if (MH_Initialize() == MH_OK) {
             MH_CreateHook(&CreateFileA, &HookedCreateFileA, reinterpret_cast<LPVOID*>(&fpCreateFileA));
+            MH_CreateHook(&CreateFileW, &HookedCreateFileW, reinterpret_cast<LPVOID*>(&fpCreateFileW));
             MH_CreateHook(&ReadFile, &HookedReadFile, reinterpret_cast<LPVOID*>(&fpReadFile));
             MH_CreateHook(&WriteFile, &HookedWriteFile, reinterpret_cast<LPVOID*>(&fpWriteFile));
             MH_EnableHook(MH_ALL_HOOKS);
