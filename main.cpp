@@ -5,92 +5,6 @@
 #include <vector>
 #include <algorithm>
 
-// --- 1. version.dll 代理轉發宣告 ---
-HINSTANCE hRealVersion = NULL;
-
-typedef BOOL (WINAPI *pfnGetFileVersionInfoA)(LPCSTR, DWORD, DWORD, LPVOID);
-typedef BOOL (WINAPI *pfnGetFileVersionInfoW)(LPCWSTR, DWORD, DWORD, LPVOID);
-typedef DWORD (WINAPI *pfnGetFileVersionInfoSizeA)(LPCSTR, LPDWORD);
-typedef DWORD (WINAPI *pfnGetFileVersionInfoSizeW)(LPCWSTR, LPDWORD);
-typedef BOOL (WINAPI *pfnVerQueryValueA)(LPCVOID, LPCSTR, LPVOID*, PUINT);
-typedef BOOL (WINAPI *pfnVerQueryValueW)(LPCVOID, LPCWSTR, LPVOID*, PUINT);
-
-pfnGetFileVersionInfoA real_GetFileVersionInfoA = NULL;
-pfnGetFileVersionInfoW real_GetFileVersionInfoW = NULL;
-pfnGetFileVersionInfoSizeA real_GetFileVersionInfoSizeA = NULL;
-pfnGetFileVersionInfoSizeW real_GetFileVersionInfoSizeW = NULL;
-pfnVerQueryValueA real_VerQueryValueA = NULL;
-pfnVerQueryValueW real_VerQueryValueW = NULL;
-
-extern "C" {
-    __declspec(dllexport) BOOL WINAPI GetFileVersionInfoA(LPCSTR lptstrFilename, DWORD dwHandle, DWORD dwLen, LPVOID lpData) {
-        if (!real_GetFileVersionInfoA) {
-            char sysPath[MAX_PATH];
-            GetSystemDirectoryA(sysPath, MAX_PATH);
-            strcat_s(sysPath, sizeof(sysPath), "\\version.dll");
-            hRealVersion = LoadLibraryA(sysPath);
-            if (hRealVersion) real_GetFileVersionInfoA = (pfnGetFileVersionInfoA)GetProcAddress(hRealVersion, "GetFileVersionInfoA");
-        }
-        return real_GetFileVersionInfoA ? real_GetFileVersionInfoA(lptstrFilename, dwHandle, dwLen, lpData) : FALSE;
-    }
-
-    __declspec(dllexport) BOOL WINAPI GetFileVersionInfoW(LPCWSTR lptstrFilename, DWORD dwHandle, DWORD dwLen, LPVOID lpData) {
-        if (!real_GetFileVersionInfoW) {
-            char sysPath[MAX_PATH];
-            GetSystemDirectoryA(sysPath, MAX_PATH);
-            strcat_s(sysPath, sizeof(sysPath), "\\version.dll");
-            if (!hRealVersion) hRealVersion = LoadLibraryA(sysPath);
-            real_GetFileVersionInfoW = (pfnGetFileVersionInfoW)GetProcAddress(hRealVersion, "GetFileVersionInfoW");
-        }
-        return real_GetFileVersionInfoW ? real_GetFileVersionInfoW(lptstrFilename, dwHandle, dwLen, lpData) : FALSE;
-    }
-
-    __declspec(dllexport) DWORD WINAPI GetFileVersionInfoSizeA(LPCSTR lptstrFilename, LPDWORD lpdwHandle) {
-        if (!real_GetFileVersionInfoSizeA) {
-            char sysPath[MAX_PATH];
-            GetSystemDirectoryA(sysPath, MAX_PATH);
-            strcat_s(sysPath, sizeof(sysPath), "\\version.dll");
-            if (!hRealVersion) hRealVersion = LoadLibraryA(sysPath);
-            real_GetFileVersionInfoSizeA = (pfnGetFileVersionInfoSizeA)GetProcAddress(hRealVersion, "GetFileVersionInfoSizeA");
-        }
-        return real_GetFileVersionInfoSizeA ? real_GetFileVersionInfoSizeA(lptstrFilename, lpdwHandle) : 0;
-    }
-
-    __declspec(dllexport) DWORD WINAPI GetFileVersionInfoSizeW(LPCWSTR lptstrFilename, LPDWORD lpdwHandle) {
-        if (!real_GetFileVersionInfoSizeW) {
-            char sysPath[MAX_PATH];
-            GetSystemDirectoryA(sysPath, MAX_PATH);
-            strcat_s(sysPath, sizeof(sysPath), "\\version.dll");
-            if (!hRealVersion) hRealVersion = LoadLibraryA(sysPath);
-            real_GetFileVersionInfoSizeW = (pfnGetFileVersionInfoSizeW)GetProcAddress(hRealVersion, "GetFileVersionInfoSizeW");
-        }
-        return real_GetFileVersionInfoSizeW ? real_GetFileVersionInfoSizeW(lptstrFilename, lpdwHandle) : 0;
-    }
-
-    __declspec(dllexport) BOOL WINAPI VerQueryValueA(LPCVOID pBlock, LPCSTR lpSubBlock, LPVOID *lplpBuffer, PUINT puLen) {
-        if (!real_VerQueryValueA) {
-            char sysPath[MAX_PATH];
-            GetSystemDirectoryA(sysPath, MAX_PATH);
-            strcat_s(sysPath, sizeof(sysPath), "\\version.dll");
-            if (!hRealVersion) hRealVersion = LoadLibraryA(sysPath);
-            real_VerQueryValueA = (pfnVerQueryValueA)GetProcAddress(hRealVersion, "VerQueryValueA");
-        }
-        return real_VerQueryValueA ? real_VerQueryValueA(pBlock, lpSubBlock, lplpBuffer, puLen) : FALSE;
-    }
-
-    __declspec(dllexport) BOOL WINAPI VerQueryValueW(LPCVOID pBlock, LPCWSTR lpSubBlock, LPVOID *lplpBuffer, PUINT puLen) {
-        if (!real_VerQueryValueW) {
-            char sysPath[MAX_PATH];
-            GetSystemDirectoryA(sysPath, MAX_PATH);
-            strcat_s(sysPath, sizeof(sysPath), "\\version.dll");
-            if (!hRealVersion) hRealVersion = LoadLibraryA(sysPath);
-            real_VerQueryValueW = (pfnVerQueryValueW)GetProcAddress(hRealVersion, "VerQueryValueW");
-        }
-        return real_VerQueryValueW ? real_VerQueryValueW(pBlock, lpSubBlock, lplpBuffer, puLen) : FALSE;
-    }
-}
-
-// --- 2. 核心轉碼與 Hook 攔截邏輯 ---
 typedef HANDLE(WINAPI* FnCreateFileA)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
 typedef HANDLE(WINAPI* FnCreateFileW)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
 typedef BOOL(WINAPI* FnReadFile)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
@@ -250,7 +164,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
     case DLL_PROCESS_DETACH:
         MH_DisableHook(MH_ALL_HOOKS);
         MH_Uninitialize();
-        if (hRealVersion) FreeLibrary(hRealVersion);
         break;
     }
     return TRUE;
