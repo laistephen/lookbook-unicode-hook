@@ -1,4 +1,4 @@
-name: Build Lookbook Hook & Launcher
+name: Build Proxy version.dll
 
 on:
   push:
@@ -22,20 +22,13 @@ jobs:
       run: git clone https://github.com/TsudaKageyu/minhook.git
       shell: pwsh
 
-    - name: Compile Hook DLL
+    - name: Compile Proxy DLL
       run: |
-        cl /EHsc /LD /O2 /utf-8 main.cpp minhook/src/buffer.c minhook/src/hook.c minhook/src/trampoline.c minhook/src/hde/hde32.c minhook/src/hde/hde64.c /I"minhook/include" /I"minhook/src" user32.lib kernel32.lib /Fe:LookbookHook.dll
-      shell: cmd
-
-    - name: Compile Launcher EXE
-      run: |
-        cl /EHsc /O2 launcher.cpp user32.lib kernel32.lib /Fe:LookBook.exe
+        cl /EHsc /LD /O2 /utf-8 main.cpp minhook/src/buffer.c minhook/src/hook.c minhook/src/trampoline.c minhook/src/hde/hde32.c minhook/src/hde/hde64.c /I"minhook/include" /I"minhook/src" user32.lib kernel32.lib /Fe:version.dll
       shell: cmd
 
     - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: LookbookHook-x86
-        path: |
-          LookbookHook.dll
-          LookBook.exe
+        path: version.dll
