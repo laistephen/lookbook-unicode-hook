@@ -5,7 +5,6 @@
 #include <vector>
 #include <algorithm>
 
-// 定義原始 API 函數指標
 typedef HANDLE(WINAPI* FnCreateFileA)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
 typedef HANDLE(WINAPI* FnCreateFileW)(LPCWSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
 typedef BOOL(WINAPI* FnReadFile)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
@@ -16,7 +15,6 @@ FnCreateFileW fpCreateFileW = NULL;
 FnReadFile fpReadFile = NULL;
 FnWriteFile fpWriteFile = NULL;
 
-// 輔助函數：檢查是否為有效的 UTF-8 格式
 bool IsUtf8(const char* data, size_t size) {
     size_t i = 0;
     bool has_utf8 = false;
@@ -39,7 +37,6 @@ bool IsUtf8(const char* data, size_t size) {
     return has_utf8;
 }
 
-// 核心轉碼與智慧防呆：將 GBK/UTF-8 轉為 Big5，並將缺字（如 犟 0x729F）對應至可顯示字元
 std::vector<char> TranslateTextBuffer(const char* data, size_t size) {
     if (size == 0) return {};
 
@@ -47,17 +44,15 @@ std::vector<char> TranslateTextBuffer(const char* data, size_t size) {
     if (IsUtf8(data, size)) {
         sourceCP = CP_UTF8;
     } else {
-        sourceCP = 936; // GBK / 簡體中文
+        sourceCP = 936; // GBK
     }
 
-    // 1. 轉為寬字元 (UTF-16)
     int wlen = MultiByteToWideChar(sourceCP, 0, data, (int)size, NULL, 0);
     if (wlen <= 0) return std::vector<char>(data, data + size);
 
     std::wstring wstr(wlen, 0);
     MultiByteToWideChar(sourceCP, 0, data, (int)size, &wstr[0], wlen);
 
-    // 2. 智慧防呆替換（使用 Unicode 0x729F 對應「犟」字，轉為可顯示的「強」）
     for (size_t i = 0; i < wstr.length(); ++i) {
         wchar_t& ch = wstr[i];
         if (ch == 0x729F) {
@@ -65,7 +60,6 @@ std::vector<char> TranslateTextBuffer(const char* data, size_t size) {
         }
     }
 
-    // 3. 轉回 Big5 (CP950)
     int alen = WideCharToMultiByte(950, 0, wstr.c_str(), wlen, NULL, 0, NULL, NULL);
     if (alen <= 0) return std::vector<char>(data, data + size);
 
@@ -74,7 +68,6 @@ std::vector<char> TranslateTextBuffer(const char* data, size_t size) {
     return outBuffer;
 }
 
-// 檢查是否為 .txt 檔案
 bool IsTxtFile(LPCSTR filename) {
     if (!filename) return false;
     std::string name(filename);
@@ -83,7 +76,6 @@ bool IsTxtFile(LPCSTR filename) {
     return name.substr(name.length() - 4) == ".txt";
 }
 
-// 共用核心：讀取真實檔案 -> 轉碼轉譯 -> 建立暫存檔並回傳控制代碼
 HANDLE OpenAndRedirectTxt(HANDLE hReal) {
     if (hReal == INVALID_HANDLE_VALUE) return INVALID_HANDLE_VALUE;
     DWORD fileSize = GetFileSize(hReal, NULL);
@@ -97,12 +89,10 @@ HANDLE OpenAndRedirectTxt(HANDLE hReal) {
         CloseHandle(hReal);
         return INVALID_HANDLE_VALUE;
     }
-    CloseHandle(hReal); // 關閉原檔案
+    CloseHandle(hReal);
 
-    // 轉換編碼並修正缺字
     std::vector<char> converted = TranslateTextBuffer(fileBuffer.data(), bytesRead);
 
-    // 建立 Windows 暫存檔
     char tempPath[MAX_PATH];
     char tempFile[MAX_PATH];
     GetTempPathA(MAX_PATH, tempPath);
@@ -113,12 +103,11 @@ HANDLE OpenAndRedirectTxt(HANDLE hReal) {
         DWORD bytesWritten = 0;
         WriteFile(hTemp, converted.data(), (DWORD)converted.size(), &bytesWritten, NULL);
         SetFilePointer(hTemp, 0, NULL, FILE_BEGIN);
-        return hTemp; // 回傳轉譯後的暫存檔 Handle
+        return hTemp;
     }
     return INVALID_HANDLE_VALUE;
 }
 
-// 1. 攔截 CreateFileA
 HANDLE WINAPI HookedCreateFileA(
     LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
     LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition,
@@ -132,7 +121,6 @@ HANDLE WINAPI HookedCreateFileA(
     return fpCreateFileA(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
 }
 
-// 2. 攔截 CreateFileW (關鍵：許多 Windows 程式底層開檔走的是這個寬字元版本)
 HANDLE WINAPI HookedCreateFileW(
     LPCWSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode,
     LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition,
@@ -153,7 +141,6 @@ HANDLE WINAPI HookedCreateFileW(
     return fpCreateFileW(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile);
 }
 
-// 3. 基礎讀寫攔截
 BOOL WINAPI HookedReadFile(HANDLE hFile, LPVOID lpBuffer, DWORD nNumberOfBytesToRead, LPDWORD lpNumberOfBytesRead, LPOVERLAPPED lpOverlapped) {
     return fpReadFile ? fpReadFile(hFile, lpBuffer, nNumberOfBytesToRead, lpNumberOfBytesRead, lpOverlapped) : FALSE;
 }
@@ -162,11 +149,13 @@ BOOL WINAPI HookedWriteFile(HANDLE hFile, LPCVOID lpBuffer, DWORD nNumberOfBytes
     return fpWriteFile ? fpWriteFile(hFile, lpBuffer, nNumberOfBytesToWrite, lpNumberOfBytesWritten, lpOverlapped) : FALSE;
 }
 
-// DLL 入口點
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     switch (ul_reason_for_call) {
     case DLL_PROCESS_ATTACH:
         DisableThreadLibraryCalls(hModule);
+        // 彈窗確認是否成功載入
+        MessageBoxA(NULL, "LookbookHook (version.dll) 成功載入！", "Debug", MB_OK);
+
         if (MH_Initialize() == MH_OK) {
             MH_CreateHook(&CreateFileA, &HookedCreateFileA, reinterpret_cast<LPVOID*>(&fpCreateFileA));
             MH_CreateHook(&CreateFileW, &HookedCreateFileW, reinterpret_cast<LPVOID*>(&fpCreateFileW));
