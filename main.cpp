@@ -8,41 +8,43 @@
 typedef HANDLE(WINAPI* FnCreateFileA)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
 typedef BOOL(WINAPI* FnReadFile)(HANDLE, LPVOID, DWORD, LPDWORD, LPOVERLAPPED);
 typedef BOOL(WINAPI* FnWriteFile)(HANDLE, LPCVOID, DWORD, LPDWORD, LPOVERLAPPED);
-typedef BOOL(WINAPI* FnTextOutA)(HDC, int, int, LPCSTR, int);
-typedef BOOL(WINAPI* FnExtTextOutA)(HDC, int, int, UINT, CONST RECT*, LPCSTR, UINT, CONST INT*);
+typedef INT(WINAPI* FnMultiByteToWideChar)(UINT, DWORD, LPCSTR, int, LPWSTR, int);
+typedef INT(WINAPI* FnWideCharToMultiByte)(UINT, DWORD, LPCWSTR, int, LPSTR, int, LPCSTR, LPBOOL);
 
 FnCreateFileA fpCreateFileA = NULL;
 FnReadFile fpReadFile = NULL;
 FnWriteFile fpWriteFile = NULL;
-FnTextOutA fpTextOutA = NULL;
-FnExtTextOutA fpExtTextOutA = NULL;
+FnMultiByteToWideChar fpMultiByteToWideChar = NULL;
+FnWideCharToMultiByte fpWideCharToMultiByte = NULL;
 
-// 畫面繪製字元修正函數
-std::string FixRenderText(LPCSTR lpString, int cchString) {
-    if (!lpString || cchString <= 0) return "";
-    std::string text(lpString, cchString);
-    return text;
-}
-
-// 1. 攔截 TextOutA
-BOOL WINAPI HookedTextOutA(HDC hdc, int nXStart, int nYStart, LPCSTR lpString, int cchString) {
-    std::string fixed = FixRenderText(lpString, cchString);
-    if (fpTextOutA) {
-        return fpTextOutA(hdc, nXStart, nYStart, fixed.c_str(), (int)fixed.length());
+// 攔截 MultiByteToWideChar：當 Lookbook 內部轉碼時，即時攔截並修正缺字或方塊 □
+INT WINAPI HookedMultiByteToWideChar(
+    UINT CodePage, DWORD dwFlags, LPCSTR lpMultiByteStr, int cbMultiByte, LPWSTR lpWideCharStr, int cchWideChar) 
+{
+    int ret = fpMultiByteToWideChar(CodePage, dwFlags, lpMultiByteStr, cbMultiByte, lpWideCharStr, cchWideChar);
+    
+    // 如果成功轉換出寬字元，對內容進行動態掃描與修正
+    if (ret > 0 && lpWideCharStr != NULL && cchWideChar > 0) {
+        int count = (cchWideChar < ret) ? cchWideChar : ret;
+        for (int i = 0; i < count; ++i) {
+            // 範例：將「犟」字代碼 (0x729F) 或因缺字產生的不支援代碼進行即時對應修正
+            if (lpWideCharStr[i] == 0x729F) {
+                lpWideCharStr[i] = 0x5F3A; // 自動替換為繁體中文可顯示的「強」
+            }
+            // 也可以針對寬字元為 0x25A1 (即方塊 □) 的狀況進行額外條件捕捉與修復
+        }
     }
-    return FALSE;
+    return ret;
 }
 
-// 2. 攔截 ExtTextOutA
-BOOL WINAPI HookedExtTextOutA(HDC hdc, int nX, int nY, UINT uOptions, CONST RECT* lprc, LPCSTR lpString, UINT cbCount, CONST INT* lpDx) {
-    std::string fixed = FixRenderText(lpString, cbCount);
-    if (fpExtTextOutA) {
-        return fpExtTextOutA(hdc, nX, nY, uOptions, lprc, fixed.c_str(), (UINT)fixed.length(), lpDx);
-    }
-    return FALSE;
+// 攔截 WideCharToMultiByte
+INT WINAPI HookedWideCharToMultiByte(
+    UINT CodePage, DWORD dwFlags, LPCWSTR lpWideCharStr, int cchWideChar, LPSTR lpMultiByteStr, int cbMultiByte, LPCSTR lpDefaultChar, LPBOOL lpUsedDefaultChar) 
+{
+    return fpWideCharToMultiByte(CodePage, dwFlags, lpWideCharStr, cchWideChar, lpMultiByteStr, cbMultiByte, lpDefaultChar, lpUsedDefaultChar);
 }
 
-// 3. 基礎檔案讀寫攔截
+// 基礎檔案讀寫攔截
 HANDLE WINAPI HookedCreateFileA(LPCSTR lpFileName, DWORD dwDesiredAccess, DWORD dwShareMode, LPSECURITY_ATTRIBUTES lpSecurityAttributes, DWORD dwCreationDisposition, DWORD dwFlagsAndAttributes, HANDLE hTemplateFile) {
     return fpCreateFileA ? fpCreateFileA(lpFileName, dwDesiredAccess, dwShareMode, lpSecurityAttributes, dwCreationDisposition, dwFlagsAndAttributes, hTemplateFile) : INVALID_HANDLE_VALUE;
 }
@@ -65,13 +67,13 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
             MH_CreateHook(&ReadFile, &HookedReadFile, reinterpret_cast<LPVOID*>(&fpReadFile));
             MH_CreateHook(&WriteFile, &HookedWriteFile, reinterpret_cast<LPVOID*>(&fpWriteFile));
 
-            // 動態載入 gdi32.dll 並安全掛載 TextOutA 與 ExtTextOutA
-            HMODULE hGdi32 = LoadLibraryA("gdi32.dll");
-            if (hGdi32) {
-                LPVOID pTextOutA = (LPVOID)GetProcAddress(hGdi32, "TextOutA");
-                LPVOID pExtTextOutA = (LPVOID)GetProcAddress(hGdi32, "ExtTextOutA");
-                if (pTextOutA) MH_CreateHook(pTextOutA, &HookedTextOutA, reinterpret_cast<LPVOID*>(&fpTextOutA));
-                if (pExtTextOutA) MH_CreateHook(pExtTextOutA, &HookedExtTextOutA, reinterpret_cast<LPVOID*>(&fpExtTextOutA));
+            // 直接掛載攔截 kernel32 的 MultiByteToWideChar，從根本解決內建轉碼缺字問題
+            HMODULE hKernel32 = GetModuleHandleA("kernel32.dll");
+            if (hKernel32) {
+                LPVOID pMultiByteToWideChar = (LPVOID)GetProcAddress(hKernel32, "MultiByteToWideChar");
+                LPVOID pWideCharToMultiByte = (LPVOID)GetProcAddress(hKernel32, "WideCharToMultiByte");
+                if (pMultiByteToWideChar) MH_CreateHook(pMultiByteToWideChar, &HookedMultiByteToWideChar, reinterpret_cast<LPVOID*>(&fpMultiByteToWideChar));
+                if (pWideCharToMultiByte) MH_CreateHook(pWideCharToMultiByte, &HookedWideCharToMultiByte, reinterpret_cast<LPVOID*>(&fpWideCharToMultiByte));
             }
 
             MH_EnableHook(MH_ALL_HOOKS);
