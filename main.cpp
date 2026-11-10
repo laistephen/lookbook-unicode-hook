@@ -3,7 +3,6 @@
 #include "MinHook.h"
 #include <string>
 #include <vector>
-#include <unordered_map>
 
 // 定義原始 API 函數指標
 typedef HANDLE(WINAPI* FnCreateFileA)(LPCSTR, DWORD, DWORD, LPSECURITY_ATTRIBUTES, DWORD, DWORD, HANDLE);
@@ -37,7 +36,7 @@ bool IsUtf8(const char* data, size_t size) {
     return has_utf8;
 }
 
-// 核心轉碼與智慧防呆函數：將 GBK/UTF-8 轉為 Big5，並對 Big5 缺字進行智慧替換
+// 核心轉碼與智慧防呆函數
 std::vector<char> TranslateTextBuffer(const char* data, size_t size) {
     if (size == 0) return {};
 
@@ -55,16 +54,15 @@ std::vector<char> TranslateTextBuffer(const char* data, size_t size) {
     std::wstring wstr(wlen, 0);
     MultiByteToWideChar(sourceCP, 0, data, (int)size, &wstr[0], wlen);
 
-    // 針對 Big5 缺字進行智慧替換（例如將「犟」對應至繁體可顯示的「強」或其他防呆字元）
+    // 2. 針對 Big5 缺字進行智慧替換（使用 Unicode 16進位 0x729F 對應「犟」字）
     for (size_t i = 0; i < wstr.length(); ++i) {
         wchar_t& ch = wstr[i];
-        if (ch == L'犟') {
-            ch = L'強'; // 智慧對應至繁體中文等效字，避免產生方塊 □
+        if (ch == 0x729F) { 
+            ch = L'強'; // 自動對應至繁體可顯示字元
         }
-        // 可在此處繼續擴充其他常見的 Big5 缺字對應
     }
 
-    // 2. 再從寬字元轉回系統當前 ANSI (繁體中文 Big5 / CP950)
+    // 3. 再從寬字元轉回系統當前 ANSI (繁體中文 Big5 / CP950)
     int alen = WideCharToMultiByte(950, 0, wstr.c_str(), wlen, NULL, 0, NULL, NULL);
     if (alen <= 0) return std::vector<char>(data, data + size);
 
