@@ -11,11 +11,14 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
     STARTUPINFOA si = { sizeof(si) };
     PROCESS_INFORMATION pi = { 0 };
 
-    // 以暫停狀態啟動原本的主程式
-    if (!CreateProcessA(exePath.c_str(), NULL, NULL, NULL, FALSE, CREATE_SUSPENDED, NULL, szPath, &si, &pi)) {
+    // 正常啟動主程式（移除 CREATE_SUSPENDED，讓 OLE/COM 正常初始化）
+    if (!CreateProcessA(exePath.c_str(), NULL, NULL, NULL, FALSE, 0, NULL, szPath, &si, &pi)) {
         MessageBoxA(NULL, "找不到 LookBook_orig.exe！請確定是否已將原本的 LookBook.exe 改名為 LookBook_orig.exe。", "錯誤", MB_OK | MB_ICONERROR);
         return 1;
     }
+
+    // 稍微等待 150 毫秒，讓主程式完成初始化
+    Sleep(150);
 
     // 在目標進程中配置記憶體並寫入 DLL 路徑
     LPVOID pLibRemote = VirtualAllocEx(pi.hProcess, NULL, dllPath.length() + 1, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -34,8 +37,6 @@ int APIENTRY WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLi
         }
     }
 
-    // 恢復主程式執行
-    ResumeThread(pi.hThread);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
     return 0;
